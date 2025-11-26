@@ -1,0 +1,567 @@
+---
+title: "SEVERIN_GenesPlatelets"
+format: html
+editor: visual
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, error=FALSE, message = FALSE)
+```
+
+PCA axis one separates individuals in function of the treatment, axis 2 separates in function of the diet.
+
+```{r load scripts, fig.width=6, fig.height=5}
+
+source("./R/data_load.R")
+source("./R/Edger_analysis.R")
+MetaData <- MetaData[match(colnames(RNAseq$WS), MetaData$Diet_Treatment.Rep),]
+AllCors <- sapply(row.names(RNAseq$WS), function(x){
+  cor(
+    as.numeric(RNAseq$WS['Hba-a1',]),
+  as.numeric(RNAseq$WS[x,])
+  )
+})
+```
+
+## graph of platelet count
+
+The effect of the enrichment or depletion in platelets is not affected by the diet.
+
+```{r platelet count, fig.width=3, fig.height=2}
+MetaData |> 
+  separate(Diet_Treatment.Rep, c('Diet', 'Treatment'), sep = '_') |> 
+  separate(Treatment, c('Treatment', 'Sample'), sep = '\\.') |> 
+  mutate(Treatment = factor(Treatment, levels = c('LPC', 'CTL', 'HPC'), ordered = T)) |> 
+  ggplot(aes(x = Treatment, 
+             y = sqrt(TP), 
+             color = Diet, 
+             group = Diet, 
+             shape = Treatment))+
+  stat_summary(fun.data = mean_se)+
+  geom_smooth(method = 'lm')+
+  scale_color_manual(values = c('coral','gray30'))+
+  theme_classic()+
+  xlab('Group')+
+  ylab('√Platelet count')
+
+```
+
+## PCAs
+
+two axis are sufficient to explain most of the data variability. PCA is calculated on the whole dataset, then the representation is split but keeps the parameters of the complete analysis.
+
+```{r PCAs, fig.width=6, fig.height=4}
+ResPCA <- FactoMineR::PCA(format_to_PCA(RNAseq), quali.sup = 1, graph = F)
+
+factoextra::fviz_eig(ResPCA)
+factoextra::fviz_pca_ind(ResPCA, 
+                         habillage = 1, 
+                         addEllipses = T, 
+                         geom.ind = 'point',
+                         select.ind = list(name = row.names(pData[grepl('ND', row.names(pData)),])),
+                         title = 'PCA on all genes for Normal Diet')+
+  scale_color_manual(values = c( 'black','#00c800', '#5959ff'))+
+  scale_fill_manual(values = c( 'black','#00c800', '#5959ff'))+
+  scale_shape_manual(values = c(2,0,1))
+
+factoextra::fviz_pca_ind(ResPCA, 
+                         habillage = 1, 
+                         addEllipses = T, 
+                         geom.ind = 'point',
+                         select.ind = list(name = row.names(pData[grepl('HFC', row.names(pData)),])),
+                         title = 'PCA on all genes for HFC diet')+
+  scale_color_manual(values = c( 'black','#00c800', '#5959ff'))+
+  scale_fill_manual(values = c( 'black','#00c800', '#5959ff'))+
+  scale_shape_manual(values = c(2,0,1))
+
+
+```
+
+## GSEA on correlation level of the genes to the platelet count
+
+A GSEA analysis is calculated for each diet, using the Pearson's correlation coefficient of the gene expression to square root of the platelet count as score.
+
+```{r prepare GSEA}
+# Preparing GO categories: building-up a GenomicRessource using Bioconductor.
+Bioconductor <- ViSEAGO::Bioconductor2GO()
+
+# Getting for each genes the related GO categories.
+myGENE2GO <- ViSEAGO::annotate(id = "org.Mm.eg.db", object = Bioconductor)
+
+# Getting for each GO category the related genes.
+GOgenes = topGO::inverseList(slot(myGENE2GO, 'BP'))
+
+GSEAres <- list()
+gsea_score <- list()
+platelet_cnt <- list()
+p.values.pearson <- list()
+for(diets in c('ND', 'HFC')){
+  sample_name <- row.names(RNAseq$pData)[grepl(diets, RNAseq$pData$group)]
+  platelet_cnt <- MetaData[match(colnames(RNAseq$WS),MetaData$Diet_Treatment.Rep),'TP']
+  platelet_cnt <- MetaData[MetaData$Diet_Treatment.Rep %in% sample_name,]
+  gsea_score[[diets]] <- apply(RNAseq$WS[,sample_name], 1, function(x){
+    cor.test(sqrt(platelet_cnt$TP),x)$estimate})
+  p.values.pearson[[diets]] <- apply(RNAseq$WS[,sample_name], 1, function(x){
+    cor.test(sqrt(platelet_cnt$TP),x)$p.value})
+  set.seed(1234)
+  GSEAres[[diets]] <- fgsea(GOgenes,
+                            setNames(gsea_score[[diets]], as.character(RNAseq$ResTable$gene_id)),
+                            minSize = 5,
+                            maxSize = 500)
+  GSEAres[[diets]]$go_name <- GOfuncR::get_names(GSEAres[[diets]]$pathway)$go_name      
+}
+
+GOspecCats <- lapply(GSEAres, function(x){
+  x$pathway[x$padj<.05]
+})
+
+venn::venn(GOspecCats,
+           ilabels = 'counts')
+
+My_GOsemSim <- GOSemSim::godata(
+  annoDb = org.Mm.eg.db::org.Mm.eg.db,
+  keytype = "ENTREZID",
+  ont = 'BP',
+  computeIC = TRUE,
+  processTCSS = FALSE,
+  cutoff = NULL
+)  
+
+my.Sim.matrix <- sapply(unique(unlist(GOspecCats)), function(x) {
+  GOSemSim::goSim(x, unique(unlist(GOspecCats)), My_GOsemSim, measure = "Wang")
+}) |> as.data.frame()
+my.Sim.matrix <- my.Sim.matrix[, !is.na(my.Sim.matrix[1, ])]
+row.names(my.Sim.matrix) <- colnames(my.Sim.matrix)
+
+Sim.matrix.HM <- pheatmap::pheatmap(my.Sim.matrix, show_colnames = F, silent = T)[[4]]
+
+ggpubr::ggarrange(plotlist = list(Sim.matrix.HM))
+
+clustering <- hclust(as.dist(1-my.Sim.matrix), method = "ward.D2")
+
+clustered_GO <- as.data.frame(cutree(clustering, k = 20)) |> tibble::rownames_to_column('go_id')
+colnames(clustered_GO)<- c('pathway', 'GOcluster')
+
+GSEAresTD <- cbind.data.frame(
+  Diet = rep(names(GSEAres), each = dim(GSEAres$ND)[1]),
+  do.call(rbind.data.frame, GSEAres)) |> 
+  dplyr::left_join(clustered_GO)
+
+
+resumedGSEA <- GSEAresTD |> 
+  tidyr::unnest(leadingEdge) |> 
+  dplyr::rename(gene_id = leadingEdge) |>
+  left_join(RNAseq$ResTable |> 
+              dplyr::mutate(gene_id = as.character(gene_id)) |> 
+              dplyr::select(gene_id, gene_name)) |> 
+  dplyr::select(-gene_id) |> 
+  dplyr::group_by(Diet, pathway) |> 
+  dplyr::mutate(LE_size = length(gene_name)) |> 
+  dplyr::group_by(Diet, go_name, GOcluster, pathway, ES, NES, padj, log2err, pval, size) |> 
+  summarize(LE_size = mean(LE_size),
+            gene_name = paste(gene_name, collapse = ',')) |> 
+  ungroup() |> 
+  dplyr::mutate(hits_ratio = LE_size/size)
+
+```
+
+## Heat maps.
+
+### Normal Diet
+
+Genes represented are considered DEG for at least two comparisons within each diet.
+
+```{r, echo=FALSE, fig.width=3, fig.height=5}
+
+Heat_Map_ND <- plot_HM(
+  RNAseq = RNAseq,
+  sel.genes = adjResTable$gene_id[rowSums(adjResTable[, grepl('FDR', colnames(adjResTable)) &
+                                                          !grepl('HFC', colnames(adjResTable))] < .05) > 1] ,
+  nclust = 3,
+  FDR.threshold = 0.05,
+  fontsize_col = 7,
+  group_colors = c('black', '#00c800', '#5959ff'),
+  remove.ind = row.names(pData[grepl('HFC', row.names(pData)), ]),
+  ClusTableName = 'HMclust_ND'
+)
+gridExtra::grid.arrange(Heat_Map_ND)
+
+HMclust_ND$ResTable<- HMclust_ND$ResTable[,!grepl('HFC', colnames(HMclust_ND$ResTable))&
+                      !grepl('LR', colnames(HMclust_ND$ResTable))]
+
+```
+
+### HFC
+
+```{r, echo=FALSE, fig.width=3, fig.height=5}
+
+Heat_Map_HFC <- plot_HM(
+  RNAseq = RNAseq,
+  sel.genes = adjResTable$gene_id[rowSums(adjResTable[, grepl('FDR', colnames(adjResTable)) &
+                                                          !grepl('ND', colnames(adjResTable))] < .05) > 1] ,
+  nclust = 2,
+  FDR.threshold = 0.05,
+  fontsize_col = 7,
+  group_colors = c('black', '#00c800', '#5959ff'),
+  remove.ind = row.names(pData[grepl('ND', row.names(pData)), ]),
+  ClusTableName = 'HMclust_HFC'
+)
+gridExtra::grid.arrange(Heat_Map_HFC)
+
+HMclust_HFC$ResTable<- HMclust_HFC$ResTable[,!grepl('HFC', colnames(HMclust_HFC$ResTable))&
+                      !grepl('LR', colnames(HMclust_HFC$ResTable))]
+
+```
+
+## global profiles of genes for each cluster
+
+for each individuals, the values of all each gene from each cluster are centered to the logCPM value of the gene minus the mean of the logCPM of all individuals. values are presented as mean +/- sem. A linear model is ploted to fit for each diet.
+
+```{r clusters profile, fig.width=3, fig.height=5}
+RNAseq$WS |> 
+  rownames_to_column('gene_name') |> 
+  left_join(HMclust_ND$ResTable |> dplyr::select(gene_name, cluster)) |> 
+  filter(!is.na(cluster)) |> 
+  pivot_longer(!c(gene_name, cluster), names_to = 'Diet_Treatment.Rep', values_to = 'logCPM') |> 
+  left_join(MetaData) |> 
+  separate(Diet_Treatment.Rep, c('group', 'Rep'), sep = '\\.') |> 
+  separate(group, c('diet', 'treatment'), sep = '_') |> 
+  filter(diet != 'HFC') |> 
+  group_by(gene_name) |> 
+  mutate(normCPM = logCPM - mean(logCPM)) |> 
+  ungroup() |> 
+  ggplot(aes(x = sqrt(TP), y = normCPM, group = diet)) +
+  stat_summary(fun.data = mean_se, aes(shape = treatment, color = treatment))+
+  geom_smooth(method = 'lm', color = 'black')+
+  facet_wrap(facets = vars(cluster), 
+             scales = 'free_y',
+             ncol = 1)+
+  ggtitle('Normal Diet')+
+  theme_classic()+
+  scale_color_manual(values = c('black', '#00c800', '#5959ff'))+
+  scale_shape_manual(values = rep(c(17,15,16),2))
+
+RNAseq$WS |> 
+  rownames_to_column('gene_name') |> 
+  left_join(HMclust_HFC$ResTable |> dplyr::select(gene_name, cluster)) |> 
+  filter(!is.na(cluster)) |> 
+  pivot_longer(!c(gene_name, cluster), names_to = 'Diet_Treatment.Rep', values_to = 'logCPM') |> 
+  left_join(MetaData) |> 
+  separate(Diet_Treatment.Rep, c('group', 'Rep'), sep = '\\.') |> 
+  separate(group, c('diet', 'treatment'), sep = '_') |> 
+  filter(diet == 'HFC') |> 
+  group_by(gene_name) |> 
+  mutate(normCPM = logCPM - mean(logCPM)) |> 
+  ungroup() |> 
+  ggplot(aes(x = sqrt(TP), y = normCPM, group = diet)) +
+  stat_summary(fun.data = mean_se, aes(shape = treatment, color = treatment))+
+  geom_smooth(method = 'lm', color = 'black')+
+  facet_wrap(facets = vars(cluster), 
+             scales = 'free_y',
+             ncol = 1)+
+  ggtitle('HFC')+
+  theme_classic()+
+  scale_color_manual(values = c('black', '#00c800', '#5959ff'))+
+  scale_shape_manual(values = rep(c(17,15,16),2))
+
+```
+
+## GO enrichement over genes for each cluster, amongst the most differentialy expressed categories from GSEA
+
+### Normal Diet
+
+Represented GO categories are found correlated to the platelet count only in Normal Diet (GSEA adj.p.val \< 0.05). For clusters 2 and 3, GO categories were grouped by proximity using GOsemSim package, and the most significantly enriched category was picked for each cluster of GO category.
+
+```{r GO clusters ND, fig.width=6, fig.height=3}
+bestGO_ND <- resumedGSEA |> 
+  filter(pathway %in% GOspecCats$ND,
+         Diet == 'ND') |> 
+  group_by(GOcluster) |> 
+  arrange(padj) |> 
+  dplyr::slice(1) |> 
+  ungroup() |> 
+  dplyr::select(pathway) |> unlist()
+
+clusters_profiles <- list()
+res_enrich_ND <- list()
+for (i in 1:max(HMclust_ND$ResTable$cluster))
+{
+  genes_to_enrich <- HMclust_ND$ResTable[HMclust_ND$ResTable$cluster == i,'gene_id']
+
+  if(i == 1){
+  res_enrich_ND[[i]] <- sapply(GOgenes[GOspecCats$ND], function(x){
+  if(sum(genes_to_enrich %in% x)<3){NA}else{
+    phyper(
+      length(genes_to_enrich[genes_to_enrich %in% x]),
+      length(x),
+      length(adjResTable$gene_name[
+        !adjResTable$gene_name %in% x
+      ]),
+      length(genes_to_enrich),
+      lower.tail = FALSE)
+  }
+  
+})
+}else{
+  res_enrich_ND[[i]] <- sapply(GOgenes[bestGO_ND], function(x){
+  if(sum(genes_to_enrich %in% x)<3){NA}else{
+    phyper(
+      length(genes_to_enrich[genes_to_enrich %in% x]),
+      length(x),
+      length(adjResTable$gene_name[
+        !adjResTable$gene_name %in% x
+      ]),
+      length(genes_to_enrich),
+      lower.tail = FALSE)
+  }
+  
+})
+}
+  
+
+res_enrich_ND[[i]] <- data.frame(p.value = res_enrich_ND[[i]],
+           go_id = names(res_enrich_ND[[i]]),
+           go_name = GOfuncR::get_names(names(res_enrich_ND[[i]]))$go_name)
+res_enrich_ND[[i]] <- res_enrich_ND[[i]][!is.na(res_enrich_ND[[i]]$p.value),]
+res_enrich_ND[[i]]$p.adj <- p.adjust(res_enrich_ND[[i]]$p.value, method = 'BH')
+ }
+
+res_enrich_ND <- cbind.data.frame(
+  cluster = paste('cluster', rep(1:length(res_enrich_ND), sapply(res_enrich_ND, dim)[1,]), sep = '_'),
+  do.call(rbind.data.frame, res_enrich_ND))
+
+customGO_ClusPlot(res_enrich_ND ,
+                  .05,
+                  upper_y = 0.45,
+                  lower_y = 0.45)
+
+```
+
+### HFC
+
+Represented GO categories are found correlated to the platelet count only in HFC diet only (GSEA adj.p.val \< 0.001). GO categories that are also found enriched in Normal Diet are not presented.
+
+```{r GO clusters HFC, fig.width=6, fig.height=5}
+clusters_profiles <- list()
+res_enrich_HFC <- list()
+for (i in 1:max(HMclust_HFC$ResTable$cluster))
+{
+  genes_to_enrich <- HMclust_HFC$ResTable[HMclust_HFC$ResTable$cluster == i,'gene_id']
+
+res_enrich_HFC[[i]] <- sapply(GOgenes[GOspecCats$HFC[!GOspecCats$HFC %in% GOspecCats$ND]], function(x){
+  if(sum(genes_to_enrich %in% x)<3){NA}else{
+    phyper(
+      length(genes_to_enrich[genes_to_enrich %in% x]),
+      length(x),
+      length(adjResTable$gene_name[
+        !adjResTable$gene_name %in% x
+      ]),
+      length(genes_to_enrich),
+      lower.tail = FALSE)
+  }
+  
+})
+
+res_enrich_HFC[[i]] <- data.frame(p.value = res_enrich_HFC[[i]],
+           go_id = names(res_enrich_HFC[[i]]),
+           go_name = GOfuncR::get_names(names(res_enrich_HFC[[i]]))$go_name)
+res_enrich_HFC[[i]] <- res_enrich_HFC[[i]][!is.na(res_enrich_HFC[[i]]$p.value),]
+res_enrich_HFC[[i]]$p.adj <- p.adjust(res_enrich_HFC[[i]]$p.value, method = 'BH')
+ }
+
+res_enrich_HFC <- cbind.data.frame(
+  cluster = paste('cluster', rep(1:length(res_enrich_HFC), sapply(res_enrich_HFC, dim)[1,]), sep = '_'),
+  do.call(rbind.data.frame, res_enrich_HFC))
+
+customGO_ClusPlot(res_enrich_HFC,
+                  .001,
+                  upper_y = 0.45,
+                  lower_y = 0.45)
+
+```
+
+## Pearson's correlation of within clusters
+
+### ND
+
+```{r, fig.width=2}
+correlation.table <- do.call(rbind.data.frame,
+        lapply(c('ND', 'HFC'), function(x){
+          cbind.data.frame(
+            diet = rep(x, length(gsea_score[[x]])),
+            gene_name = names(gsea_score[[x]]),
+            pearson.coef = as.data.frame(gsea_score[[x]]),
+            p.value = as.data.frame(p.values.pearson[[x]]),
+            p.adj = p.adjust(p.values.pearson[[x]], method = 'BH')
+          )
+        }) )
+colnames(correlation.table)[3:4]<- c('Pearson_coef', 'p.value')
+
+correlation.table |> 
+  left_join(HMclust_ND$ResTable[, c('gene_name', 'cluster')]) |> 
+  mutate(cluster = as.character(cluster)) |> 
+  drop_na() |> 
+  ggplot(aes(x = 1, y = Pearson_coef, color = cluster))+
+  geom_jitter()+
+  geom_hline(yintercept = c(0.75, -0.75), linetype = 'dotdash')+
+  theme_classic()+
+  scale_color_manual(values = c('coral', 'slategrey', 'orchid'))+
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+```
+
+### HFC
+
+```{r, fig.width=2}
+correlation.table |> 
+  left_join(HMclust_HFC$ResTable[, c('gene_name', 'cluster')]) |> 
+  mutate(cluster = as.character(cluster)) |> 
+  drop_na() |> 
+  ggplot(aes(x = 1, y = Pearson_coef, color = cluster))+
+  geom_jitter()+
+  geom_hline(yintercept = c(0.75, -0.75), linetype = 'dotdash')+
+  theme_classic()+
+  scale_color_manual(values = c('coral', 'slategrey', 'orchid'))+
+  theme(axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+```
+
+```{r export all table, include=FALSE}
+all_table <- RNAseq$ResTable[,c('gene_name', 
+                   'gene_id')] |> 
+  dplyr::rename(ENTREZ_id = gene_id) |> 
+  left_join(RNAseq$WS |> rownames_to_column('gene_name')) |> 
+  left_join(correlation.table |> 
+              pivot_longer(!c(gene_name, diet),
+                           names_to = 'nom_col',
+                           values_to = 'valeurs') |> 
+              mutate(nom_col = paste(nom_col, diet, sep = '_')) |> 
+              dplyr::select(-diet) |> 
+              pivot_wider(names_from = nom_col, values_from = valeurs)) |> 
+  left_join(adjResTable[,c('gene_name',
+                           colnames(adjResTable)[grepl('logFC', 
+                                                       colnames(adjResTable))],
+                           colnames(adjResTable)[grepl('LR', 
+                                                       colnames(adjResTable))],
+                           colnames(adjResTable)[grepl('p.value', 
+                                                       colnames(adjResTable))],
+                           colnames(adjResTable)[grepl('FDR', 
+                                                       colnames(adjResTable))])])
+
+```
+
+
+## Ploting selected genes
+
+exemple with genes from the category "fatty acid beta-oxidation" present in the first cluster of the HFC heat map. z.score = centered and reduced logCPM.
+
+```{r}
+dat_for_graphs <- RNAseq$WS |>
+  rownames_to_column('gene_name') |>
+  pivot_longer(!gene_name, names_to = 'Diet_Treatment.Rep', values_to = 'logCPM') |>
+  left_join(MetaData) |>
+  separate(Diet_Treatment.Rep, c('Diet', 'Treatment', 'Rep')) |>
+  group_by(gene_name) |>
+  mutate(z.score = (logCPM - mean(logCPM)) / sd(logCPM))
+
+graph_genes <- resumedGSEA |> 
+  filter(go_name=='fatty acid beta-oxidation')|>
+  filter(padj<.05) |> 
+  unnest(gene_name, names_sep = ',') |> 
+  dplyr::select(gene_name) |> 
+  unlist() |> 
+  strsplit(split = ',') |> 
+  unlist()
+
+dat_for_graphs |>  
+  filter(gene_name %in% graph_genes) |> 
+  filter(gene_name %in% HMclust_HFC$ResTable$gene_name[HMclust_HFC$ResTable$cluster == 1]) |>  
+  ggplot(aes(x = sqrt(TP), 
+                 y = z.score, 
+                 group = Diet, 
+                 color = Diet))+
+  geom_point(aes(shape = Treatment))+
+  geom_smooth(aes(),
+              method = 'lm',
+              formula = y~x)+
+  xlab('√Platelet count')+
+  theme_classic()+
+  facet_wrap(facet = vars(gene_name))
+  
+```
+## Top40 genes per Heatmaps clusters
+
+# ND
+
+```{r top40 per cluster_ND, fig.height=20, fig.width= 5}
+
+top40_ND_score <- get_top_genes(HMclust_ND, 40) 
+top40_ND_graphs <- lapply(1:length(top40_ND_score),
+       function(x)
+       {
+         dat_for_graphs |> 
+           filter(gene_name %in% 
+                    top40_ND_score[[x]]$gene_name) |> 
+           left_join(top40_ND_score[[x]]) |> 
+           filter(Diet == 'ND') |> 
+           ggplot(aes(x = sqrt(TP), 
+                      y = z.score, 
+                      group = Diet))+
+           geom_point(aes(shape = Treatment, color = Treatment))+
+           geom_smooth(aes(),
+                       method = 'lm',
+                       formula = y~x,
+                       color = 'black')+
+           xlab('√Platelet count')+
+           ggtitle(paste('Top40 genes in cluster', x, sep = ' ')) +
+           scale_color_manual(values = c('black', '#00c800', '#5959ff'))+
+           theme_classic()+
+           theme(legend.position = 'top',
+                 strip.background = element_blank()) +
+           facet_wrap(facet = vars(fct_reorder(gene_name, -score)))
+       })
+ggpubr::ggarrange(plotlist = top40_ND_graphs, 
+                  ncol = 1, 
+                  common.legend = T)
+
+
+```
+
+# HFC
+
+```{r top40 per cluster_HFC, fig.height=20, fig.width= 5}
+
+top40_HFC_score <- get_top_genes(HMclust_HFC, 40) 
+top40_HFC_graphs <- lapply(1:length(top40_HFC_score),
+       function(x)
+         {
+         dat_for_graphs |> 
+           filter(gene_name %in% top40_HFC_score[[x]]$gene_name) |> 
+           left_join(top40_HFC_score[[x]]) |> 
+           filter(Diet == 'HFC') |> 
+           ggplot(aes(x = sqrt(TP), 
+                      y = z.score, 
+                      group = Diet))+
+           geom_point(aes(shape = Treatment, color = Treatment))+
+           geom_smooth(aes(),
+                       method = 'lm',
+                       formula = y~x,
+                       color = 'black')+
+           xlab('√Platelet count')+
+           ggtitle(paste('Top40 genes in cluster', x, sep = ' ')) +
+           scale_color_manual(values = c('black', '#00c800', '#5959ff'))+
+           theme_classic()+
+           theme(legend.position = 'top',
+                 strip.background = element_blank()) +
+           facet_wrap(facet = vars(fct_reorder(gene_name, -score)))
+       })
+ggpubr::ggarrange(plotlist = top40_HFC_graphs, 
+                  ncol = 1, 
+                  common.legend = T)
+
+
+```
